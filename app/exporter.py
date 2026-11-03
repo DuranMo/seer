@@ -7,9 +7,10 @@ import tempfile
 
 from .video_utils import Crop, Media, validate_trim
 
-RATES = (15, 24, 30, 60)
+RATES = (15, 24, 30, 60, 90, 120, 144, 165, 240)
 VIDEO_FORMATS = ('mp4', 'webm', 'gif', 'mov')
 AUDIO_FORMATS = ('mp3', 'wav', 'flac', 'm4a')
+STAGING_PREFIX = '.seer-'
 
 
 @dataclass(frozen=True)
@@ -41,7 +42,7 @@ def export_args(media: Media, options: ExportOptions, output: Path) -> list[str]
     else:
         options.crop.validate(media.width, media.height)
         if options.fps is not None and options.fps not in RATES:
-            raise ValueError('Choose 15, 24, 30, or 60 FPS.')
+            raise ValueError('Choose one of the available output frame rates.')
         c = options.crop
         # exact=1 avoids implicit chroma rounding; pad preserves odd crop sizes.
         filters = [f'crop={c.width}:{c.height}:{c.x}:{c.y}:exact=1']
@@ -79,7 +80,7 @@ class ExportTarget:
         self.overwrite = overwrite
         if self.destination.exists() and not overwrite:
             raise FileExistsError('The destination already exists.')
-        fd, name = tempfile.mkstemp(prefix='.seer-', suffix='.' + destination.suffix.lstrip('.'), dir=self.destination.parent)
+        fd, name = tempfile.mkstemp(prefix=STAGING_PREFIX, suffix='.' + destination.suffix.lstrip('.'), dir=self.destination.parent)
         os.close(fd)
         self.temporary = Path(name)
 

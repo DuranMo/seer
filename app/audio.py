@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from queue import Queue, Full
 import threading
+import math
 import time
 import wave
 
@@ -15,6 +16,7 @@ class AudioDevice:
     name: str
     channels: int
     rate: int
+    process_ids: tuple[int, ...] = ()
 
 
 def devices() -> tuple[list[AudioDevice], str]:
@@ -46,8 +48,22 @@ class AudioCapture:
         self.thread = None
         self.samples = 0
         self.was_active = False
+        self.clock_offset = None
+        self.native = None
 
     def start(self):
+        if self.device.mode == 'apps':
+            from .process_audio import ProcessAudio
+            self.native = ProcessAudio(self)
+            self.thread = threading.Thread(target=self._write, daemon=True)
+            self.thread.start()
+            try:
+                self.native.start()
+                self.was_active = True
+            except Exception:
+                self.stop()
+                raise
+            return
         import pyaudiowpatch as pa
         self.audio = pa.PyAudio()
         try:
@@ -71,10 +87,15 @@ class AudioCapture:
         # PortAudio ADC and current_time share a clock. Convert the sample's
         # capture timestamp to epoch time, as used by gdigrab's packet PTS.
         now = time.time()
-        stamp = now + clock['input_buffer_adc_time'] - clock['current_time']
-        if not stamp or abs(stamp - now) > 5:
+        adc, current = clock['input_buffer_adc_time'], clock['current_time']
+        if not all(math.isfinite(v) for v in (adc, current)) or abs(adc - current) > 5:
             self.error = 'The audio device returned an invalid capture clock.'
             return None, pa.paAbort
+        # Calibrate once. Recomputing wall-clock - stream-clock for every
+        # callback injects scheduler jitter into otherwise continuous PCM.
+        if self.clock_offset is None:
+            self.clock_offset = now - current
+        stamp = self.clock_offset + adc
         if self.first_time is None:
             self.first_time = stamp
         if status & pa.paInputOverflow:
@@ -87,6 +108,15 @@ class AudioCapture:
             return None, pa.paAbort
         return None, pa.paContinue
 
+    def sample_position(self, stamp: float, origin: float, *, first=False) -> int:
+        target = round((stamp - origin) * self.device.rate)
+        # WASAPI timestamps can wobble by a few milliseconds. Preserve every
+        # sample in a continuous run; only bridge real gaps, never splice tiny
+        # overlaps out of the waveform (which produces clicks/raspy sound).
+        if not first and abs(target - self.samples) <= round(self.device.rate * 0.02):
+            return self.samples
+        return target
+
     def _write(self):
         try:
             with wave.open(str(self.path), 'wb') as out:
@@ -98,23 +128,31 @@ class AudioCapture:
                     if item is None:
                         break
                     data, stamp = item
-                    target = round((stamp - self.first_time) * self.device.rate)
+                    target = self.sample_position(stamp, self.first_time)
                     # Loopback may deliver no samples during silence. Insert the
                     # measured gap rather than pulling later sound forward.
                     gap = max(0, target - self.samples)
-                    if gap > self.device.rate * 0.02:
+                    if gap:
                         while gap:
                             count = min(gap, self.device.rate)
                             out.writeframesraw(b'\0' * (count * self.device.channels * 2))
                             self.samples += count
                             gap -= count
+                    stride = self.device.channels * 2
+                    overlap = max(0, self.samples - target)
+                    if overlap > self.device.rate * 0.1:
+                        raise RuntimeError('Audio capture clock moved backwards. Restart recording.')
+                    data = data[overlap * stride:]
                     out.writeframesraw(data)
-                    self.samples += len(data) // (self.device.channels * 2)
+                    self.samples += len(data) // stride
         except Exception as error:
             self.error = f'Audio file could not be written: {error}'
 
     def stop(self):
         errors = []
+        if self.native:
+            self.native.stop()
+            self.native = None
         if self.stream:
             try:
                 self.was_active = self.stream.is_active()

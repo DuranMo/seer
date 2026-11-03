@@ -57,6 +57,9 @@ def test_real_trim_crop_and_formats(sample, ffmpeg, tmp_path, fmt):
 
 def test_vfr_preserves_actual_timestamps(sample, ffmpeg, tmp_path):
     assert sample.variable_rate
+    quick = probe(sample.path, inspect_frames=False)
+    assert quick.duration == sample.duration and quick.time_base == sample.time_base
+    assert quick.timestamps == ()  # Editor can open before asynchronous frame inspection.
     output = tmp_path / 'preserved.mp4'
     run_checked([ffmpeg] + export_args(sample, ExportOptions('mp4', 0, 3, Crop(0, 0, 160, 120)), output))
     result = probe(output)

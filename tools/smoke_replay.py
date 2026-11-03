@@ -42,7 +42,8 @@ def main():
     def started():
         nonlocal original_pid, folder
         original_pid, folder = replay.process.processId(), replay.folder
-        print('Replay ready:', replay.encoder, 'audio=', bool(device), flush=True)
+        print('Replay ready:', replay.encoder, 'audio=', bool(device),
+              'capture=', 'GDI fallback' if replay.capture_output is None else f'Desktop Duplication output {replay.capture_output}', flush=True)
         replay.video.retention = replay.sound.retention = 3
         replay.begin_recording(sessions.create() / 'screen.mp4')
         QTimer.singleShot(1500, clip)

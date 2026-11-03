@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import replace
+import json
 
-from PySide6.QtCore import QRectF, QStandardPaths, Qt, QUrl, Signal
+from PySide6.QtCore import QRectF, QStandardPaths, Qt, QUrl, Signal, QProcess
 from PySide6.QtGui import QImage
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame
 from PySide6.QtWidgets import (QAbstractSpinBox, QDoubleSpinBox, QFileDialog, QHBoxLayout, QLabel,
@@ -13,7 +15,7 @@ from .editor_state import EditorState
 from .exporter import ExportOptions, ExportTarget, export_args
 from .jobs import FFmpegJob, background
 from .preview import Preview
-from .video_utils import Media, probe
+from .video_utils import Media, probe, executable, number
 from .timing import clock, seconds_label
 
 
@@ -29,6 +31,9 @@ class Editor(QWidget):
         self.temporary_source = False
         self.pending_position = None
         self.valid_range = (0.0, 1.0)
+        self.timing_probe = QProcess(self)
+        self.timing_probe.finished.connect(self._timing_ready)
+        self.timing_path = None
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
         self.player.setAudioOutput(self.audio)
@@ -108,6 +113,7 @@ class Editor(QWidget):
         self.status.setVisible(bool(text))
 
     def load(self, path: Path, temporary: bool = False):
+        self._stop_timing_probe()
         self.temporary_source = temporary
         self.player.stop()
         self.player.setSource(QUrl())
@@ -116,7 +122,26 @@ class Editor(QWidget):
         self.pending_position = None
         self.setEnabled(False)
         self.message('Opening recording…')
-        self.worker = background(probe, (path,), self._loaded, self._load_failed)
+        self.worker = background(lambda: probe(path, inspect_frames=False), result=self._loaded, error=self._load_failed)
+
+    def _stop_timing_probe(self):
+        self.timing_path = None
+        if self.timing_probe.state() != QProcess.ProcessState.NotRunning:
+            self.timing_probe.kill()
+            self.timing_probe.waitForFinished(1000)
+
+    def _timing_ready(self, code, *_):
+        if code or self.media is None or self.media.path != self.timing_path:
+            return
+        try:
+            data = json.loads(bytes(self.timing_probe.readAllStandardOutput()))
+            stamps = tuple(number(f['best_effort_timestamp_time']) for f in data.get('frames', [])
+                           if 'best_effort_timestamp_time' in f)
+            deltas = [b - a for a, b in zip(stamps, stamps[1:]) if b > a]
+            vfr = bool(deltas and max(deltas) - min(deltas) > max(0.0001, min(deltas) * 0.02))
+            self.media = replace(self.media, timestamps=stamps, variable_rate=vfr)
+        except (ValueError, KeyError):
+            pass
 
     def snapshot(self) -> EditorState | None:
         if self.media is None:
@@ -150,12 +175,37 @@ class Editor(QWidget):
             self.player.setPosition(position)
 
     def release_playback(self):
+        self._stop_timing_probe()
         self.player.stop()
         self.player.setSource(QUrl())
         self.player.setVideoSink(None)
         self.player.setAudioOutput(None)
         self.preview.sink.setVideoFrame(QVideoFrame())
         self.preview.image = QImage()
+
+    def delete_source(self, path: Path) -> list[str]:
+        from .clip_storage import delete_clip
+        if self.loading or self.exporting:
+            raise OSError('Finish opening or exporting clips before deleting one.')
+        active = self.media is not None and self.media.path == path
+        snapshot = self.snapshot() if active else None
+        if active:
+            self._stop_timing_probe()
+            self.player.stop()
+            self.player.setSource(QUrl())
+        try:
+            warnings = delete_clip(path)
+        except OSError:
+            if snapshot is not None:
+                self.restore(snapshot)
+            raise
+        if active:
+            self.media = None
+            self.temporary_source = False
+            self.pending_position = None
+            self.preview.sink.setVideoFrame(QVideoFrame())
+            self.preview.image = QImage()
+        return warnings
 
     def _loaded(self, media):
         self.loading = False
@@ -177,6 +227,14 @@ class Editor(QWidget):
         self.options.set_audio(media.has_audio)
         self.player.setSource(QUrl.fromLocalFile(str(media.path)))
         self.player.pause()
+        if not media.timestamps:
+            try:
+                self.timing_path = media.path
+                self.timing_probe.start(executable('ffprobe'), ['-v', 'error', '-select_streams',
+                    str(media.video_index), '-read_intervals', '%+2', '-show_frames',
+                    '-show_entries', 'frame=best_effort_timestamp_time', '-of', 'json', str(media.path)])
+            except RuntimeError:
+                pass
         self.message('')
         self.idle.emit()
 

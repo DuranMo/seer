@@ -23,6 +23,7 @@ class RollingAudio(AudioCapture):
         block_size = channels * 2
         index = 0
         path = None
+        received = False
 
         def close():
             nonlocal out
@@ -71,7 +72,8 @@ class RollingAudio(AudioCapture):
                     write(None, max(0, target - self.samples))
                     break
                 data, stamp = item
-                target = round((stamp - self.origin) * rate)
+                target = self.sample_position(stamp, self.origin, first=not received)
+                received = True
                 frames = len(data) // block_size
                 if target > self.samples:
                     write(None, target - self.samples)

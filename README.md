@@ -22,7 +22,13 @@ Press **Ctrl+Shift+R** to start recording & press it again to stop. Crop the vid
 
 For clips, right-click the tray icon --> **Replay --> Enabled**. Choose a length up to 2 minutes, then press **Ctrl+Shift+F8** to save what just happened. Clips automatically go to **Videos\Seer**. You can record while replay is enabled.
 
-Right-click the tray icon to change keybinds, recording frame rate, or audio. Right-click **Export** in the editor for other output formats and settings.
+Right-click the tray icon --> **Clips** to browse saved videos, rename or delete clips, edit their descriptions, or open a clip in the editor. Deleting asks for confirmation and permanently removes the video and its metadata. Titles are the actual filenames; descriptions are separate. **Keybinds** lets you change both shortcuts in one place.
+
+In the clip grid, **Ctrl-click** or **Shift-click** to select multiple clips, or **Ctrl+A** to select all. Click **Delete** to remove the selection with one confirmation.
+
+Use **Recording --> Sources** to choose the whole primary display or selected windows, and system, microphone, or selected app audio. Selected windows share one tiled video; selected apps share one mixed audio track.
+
+Recording frame rates go up to 240 FPS, with **Same as source** to match the display refresh rate. Right-click **Export** in the editor for other output formats and settings.
 
 Closing the editor returns to the tray. **Quit** deletes temporary recordings, so export anything you want to keep first. Automatically saved clips stay.
 

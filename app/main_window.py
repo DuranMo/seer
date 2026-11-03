@@ -7,15 +7,15 @@ import time
 from PySide6.QtCore import QSettings, QTimer
 from PySide6.QtGui import QActionGroup, QKeySequence
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QFileDialog,
-    QInputDialog, QKeySequenceEdit, QLabel, QMainWindow, QMenu, QSystemTrayIcon, QVBoxLayout)
+    QFormLayout, QInputDialog, QKeySequenceEdit, QLabel, QMainWindow, QMenu, QSystemTrayIcon, QVBoxLayout)
 
-from .audio import devices
+from .audio import devices, AudioDevice
 from .clip_storage import clip_destination
 from .display import primary_geometry
 from .editor_state import EditorState
 from .editor_process import EditorProcess
 from .exporter import RATES
-from .hotkey import DEFAULT_CLIP_KEYBIND, DEFAULT_KEYBIND, GlobalHotkey
+from .hotkey import DEFAULT_CLIP_KEYBIND, DEFAULT_KEYBIND, GlobalHotkey, set_shortcuts
 from .icons import application_icon
 from .jobs import background
 from .native_menu import NativeMenu
@@ -26,13 +26,11 @@ from .timing import clock
 
 
 class MainWindow(QMainWindow):
-    """Tray controller; the only top-level window is the small clip editor."""
+    """Hidden tray controller; manager and editor live in a separate process."""
     def __init__(self, settings=None, hotkey=None):
         super().__init__()
         self.setWindowTitle('Seer')
         self.setWindowIcon(application_icon())
-        self.resize(600, 440)
-        self.setMinimumSize(460, 360)
         self.settings = settings if settings is not None else QSettings()
         self.hotkey = hotkey if hotkey is not None else GlobalHotkey(self)
         self.hotkey.activated.connect(self._record)
@@ -50,6 +48,7 @@ class MainWindow(QMainWindow):
         length = int(self.settings.value('replay/seconds', 30))
         self.clip_seconds = max(1, min(120, length))
         self.quitting = self.configuring_keybind = False
+        self._notification = None
         self.session = None
         self.sessions = RecordingSessions()
         self.cleaning_up = False
@@ -70,14 +69,15 @@ class MainWindow(QMainWindow):
         self.recorder.status.connect(self._capture_status)
         self.menu = QMenu()
         self.record_action = self.menu.addAction('Start recording', self._record)
-        self.keybind_action = self.menu.addAction('Keybind…', self._keybind)
+        self.keybind_action = self.menu.addAction('Keybinds…', self._keybind)
         self.capture_menu = self.menu.addMenu('Recording')
+        self.sources_action = self.capture_menu.addAction('Sources…', self._sources)
         rate_menu = self.capture_menu.addMenu('Frame rate')
         self.rate_group = QActionGroup(self)
         saved_rate = int(self.settings.value('recording/fps', 30))
-        self.fps = saved_rate if saved_rate in RATES else 30
-        for rate in RATES:
-            action = rate_menu.addAction(f'{rate} FPS')
+        self.fps = saved_rate if saved_rate in (0,) + RATES else 30
+        for rate in (0,) + RATES:
+            action = rate_menu.addAction(f'{rate} FPS' if rate else 'Same as source (display refresh)')
             action.setCheckable(True)
             action.setData(rate)
             action.setChecked(rate == self.fps)
@@ -101,9 +101,9 @@ class MainWindow(QMainWindow):
             self.length_group.addAction(action)
         self.length_group.triggered.connect(self._length_selected)
         self.length_menu.addAction('Custom…', self._custom_length)
-        self.clip_keybind_action = replay_menu.addAction('Clip keybind…', lambda: self._keybind(True))
         self.last_clip_action = replay_menu.addAction('Open last clip', self._open_last_clip)
         self.menu.addSeparator()
+        self.library_action = self.menu.addAction('Clips…', self._show_library)
         self.open_action = self.menu.addAction('Open video…', self._open)
         self.editor_action = self.menu.addAction('Show editor', self._show_editor)
         self.editor_action.setEnabled(False)
@@ -145,8 +145,14 @@ class MainWindow(QMainWindow):
                 self._notify(str(error), True)
 
     def _notify(self, message, error=False):
-        icon = QSystemTrayIcon.MessageIcon.Warning if error else QSystemTrayIcon.MessageIcon.Information
-        self.tray.showMessage('Seer', message, icon, 4000)
+        if self._notification is None:
+            from .notification import NotificationPopup
+            self._notification = NotificationPopup(self)
+            self._notification.dismissed.connect(self._notification_dismissed)
+        self._notification.notify(message, error)
+
+    def _notification_dismissed(self):
+        self._notification = None
 
     def _binding_warning(self):
         self._notify(self.binding_error + ' Right-click Seer → Keybind to change it.', True)
@@ -171,7 +177,7 @@ class MainWindow(QMainWindow):
                                       and not self.replay.manual_finishing and not self.replay.clip_pending and not self.quitting
                                       and not self.replay.stopping)
         self.last_clip_action.setEnabled(self.last_replay is not None and not self.editor_busy and not busy and not self.quitting)
-        self.clip_keybind_action.setEnabled(not self.quitting)
+        self.library_action.setEnabled(not self.quitting)
         if not busy and not self.replay.active:
             self.tray.setToolTip(f'Seer · {shortcut} to record')
 
@@ -201,6 +207,13 @@ class MainWindow(QMainWindow):
         silent.setData('')
         self.audio_group.addAction(silent)
         matched = False
+        if selected == 'apps':
+            apps = self.audio_menu.addAction('Selected apps (change in Sources)')
+            apps.setCheckable(True)
+            apps.setData('apps')
+            apps.setChecked(True)
+            self.audio_group.addAction(apps)
+            matched = True
         for device in self.audio_devices:
             identifier = device.mode + ':' + device.name
             action = self.audio_menu.addAction(('System · ' if device.mode == 'system' else 'Microphone · ') + device.name)
@@ -229,10 +242,31 @@ class MainWindow(QMainWindow):
 
     def _selected_audio(self):
         selected = str(self.settings.value('recording/audio', ''))
+        if selected == 'apps':
+            from .capture_sources import load_selection, validate, root_process_ids
+            chosen = load_selection(self.settings, 'sources/audio')
+            if not chosen:
+                raise RuntimeError('Choose audio apps in Recording → Sources first.')
+            validate(chosen, audio=True)
+            return AudioDevice('apps', 0, 'Selected apps', 2, 48000, root_process_ids(tuple(w.pid for w in chosen)))
         device = next((d for d in self.audio_devices if d.mode + ':' + d.name == selected), None)
         if selected and (self.audio_loading or device is None):
             raise RuntimeError('The selected audio device is unavailable. Choose Audio in the tray menu or refresh devices.')
         return device
+
+    def _selected_geometry(self):
+        from .capture_sources import load_selection, region
+        return region(primary_geometry(), load_selection(self.settings, 'sources/video'))
+
+    def _sources(self):
+        if self.recorder.busy or self.replay.active or self.quitting:
+            return
+        from .source_dialog import SourceDialog
+        exclude = [self.editor.process.pid] if self.editor else []
+        dialog = SourceDialog(self.settings, self.audio_devices, exclude, self)
+        dialog.exec()
+        dialog.deleteLater()
+        self._audio_devices((self.audio_devices, ''))
 
     def _toggle_replay(self, enabled):
         if self.quitting:
@@ -246,7 +280,9 @@ class MainWindow(QMainWindow):
                 self.clip_hotkey.set_shortcut(str(self.settings.value('replay/keybind', DEFAULT_CLIP_KEYBIND)))
                 self.replay_enabled = True
                 self.replay_action.setChecked(True)
-                self.replay.start(self.fps, device, primary_geometry())
+                geometry = self._selected_geometry()
+                from .capture_rates import resolve_rate
+                self.replay.start(resolve_rate(self.fps, geometry), device, geometry)
                 self.timer.start()
             except Exception as error:
                 self._replay_failed(str(error))
@@ -293,6 +329,7 @@ class MainWindow(QMainWindow):
             return
         try:
             self.replay.clip(self.clip_seconds, clip_destination(), permanent=True)
+            self._notify('Clip saved')
         except Exception as error:
             self._notify(str(error), True)
 
@@ -316,12 +353,12 @@ class MainWindow(QMainWindow):
             return
         if result.kind == 'clip':
             self.last_replay = result
+            if self.editor is not None:
+                self.editor.send(('clip_saved', result.state.media.path))
             if self.editor is None:
                 self.clip_path = result.state.media.path
                 self.clip_state = result.state
                 self.clip_temporary = result.state.temporary_source
-            duration = result.state.end - result.state.start
-            self._notify(f'Saved {duration:.1f}s clip to {result.state.media.path}')
         else:
             self._open_result(result)
         self._sync()
@@ -333,20 +370,35 @@ class MainWindow(QMainWindow):
         if self.last_replay is not None:
             self._open_result(self.last_replay)
 
-    def _keybind(self, clipping=False):
-        if self.configuring_keybind or self.recorder.busy:
+    def _show_library(self):
+        if self.quitting:
+            return
+        if self.editor is None:
+            try:
+                self.editor = EditorProcess(None, False, None, self, library=True)
+                self._connect_editor()
+            except (OSError, RuntimeError) as error:
+                self._notify(str(error), True)
+                return
+        else:
+            self.editor.send('library')
+        self._sync()
+
+    def _keybind(self):
+        if self.configuring_keybind or self.recorder.busy or self.replay.manual_active:
             return
         self.configuring_keybind = True
         dialog = QDialog(self)
-        hotkey = self.clip_hotkey if clipping else self.hotkey
-        setting = 'replay/keybind' if clipping else 'keybind'
-        default = DEFAULT_CLIP_KEYBIND if clipping else DEFAULT_KEYBIND
-        dialog.setWindowTitle('Clip keybind' if clipping else 'Keybind')
+        dialog.setWindowTitle('Keybinds')
         layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel('Save the most recent clip.' if clipping else 'Press once to record, again to stop.'))
-        key = QKeySequenceEdit(QKeySequence(hotkey.text or str(self.settings.value(setting, default))))
+        form = QFormLayout()
+        key = QKeySequenceEdit(QKeySequence(self.hotkey.text))
         key.setMaximumSequenceLength(1)
-        layout.addWidget(key)
+        clip_key = QKeySequenceEdit(QKeySequence(str(self.settings.value('replay/keybind', DEFAULT_CLIP_KEYBIND))))
+        clip_key.setMaximumSequenceLength(1)
+        form.addRow('Start / stop recording', key)
+        form.addRow('Save replay clip', clip_key)
+        layout.addLayout(form)
         error_label = QLabel('')
         error_label.setWordWrap(True)
         layout.addWidget(error_label)
@@ -355,14 +407,11 @@ class MainWindow(QMainWindow):
 
         def save():
             try:
-                text = key.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
-                other = self.hotkey.text if clipping else (self.clip_hotkey.text or str(self.settings.value('replay/keybind', DEFAULT_CLIP_KEYBIND)))
-                if QKeySequence(text) == QKeySequence(other):
-                    raise ValueError('Recording and clipping need different shortcuts.')
-                hotkey.set_shortcut(text)
-                self.settings.setValue(setting, hotkey.text)
-                if clipping and not self.replay_enabled:
-                    hotkey.unregister()
+                recording = key.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
+                clipping = clip_key.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
+                set_shortcuts(self.hotkey, self.clip_hotkey, recording, clipping, clip_active=self.replay_enabled)
+                self.settings.setValue('keybind', self.hotkey.text)
+                self.settings.setValue('replay/keybind', self.clip_hotkey.text)
                 self.settings.sync()
                 self._sync()
                 dialog.accept()
@@ -396,10 +445,7 @@ class MainWindow(QMainWindow):
             self._notify('Finish opening, saving, or changing options first.')
             return
         try:
-            selected = str(self.settings.value('recording/audio', ''))
-            device = next((d for d in self.audio_devices if d.mode + ':' + d.name == selected), None)
-            if selected and (self.audio_loading or device is None):
-                raise RuntimeError('The selected audio device is unavailable. Choose Audio in the tray menu or refresh devices.')
+            device = self._selected_audio()
             if self.editor is not None:
                 self.pending_clip = None
                 self.record_pending = True
@@ -415,7 +461,9 @@ class MainWindow(QMainWindow):
                 self._sync()
                 return
             self.session = self.sessions.create()
-            self.recorder.start(self.session, self.fps, device, primary_geometry())
+            geometry = self._selected_geometry()
+            from .capture_rates import resolve_rate
+            self.recorder.start(self.session, resolve_rate(self.fps, geometry), device, geometry)
             self._sync()
         except Exception as error:
             self._failed(str(error))
@@ -483,9 +531,12 @@ class MainWindow(QMainWindow):
     def _open_clip(self, path: Path, temporary=False, state=None):
         if self.editor is not None:
             self.record_pending = False
-            self.pending_clip = (path, temporary, state)
             if not self.editor_busy:
-                self.editor.send('close')
+                self.clip_path = path.resolve()
+                self.clip_temporary, self.clip_state = temporary, state
+                self.editor.send(('open', self.clip_path, temporary, state))
+                return
+            self.pending_clip = (path, temporary, state)
             return
         self.clip_path = path.resolve()
         self.clip_temporary = temporary
@@ -496,18 +547,54 @@ class MainWindow(QMainWindow):
         if self.clip_path is None:
             return
         if self.editor is not None:
-            self.editor.send('show')
+            if self.editor.media is None:
+                self.editor.send(('open', self.clip_path, self.clip_temporary, self.clip_state))
+            else:
+                self.editor.send('show')
         else:
             try:
                 self.editor = EditorProcess(self.clip_path, self.clip_temporary, self.clip_state, self)
-                self.editor.idle.connect(self._editor_idle)
-                self.editor.saved.connect(self.sessions.protect_export)
-                self.editor.closed.connect(self._editor_closed)
-                self.editor.failed.connect(self._editor_failed)
-                self.editor.blocked.connect(self._editor_blocked)
+                self._connect_editor()
             except Exception as error:
                 self._notify('Could not open the editor: ' + str(error), True)
         self._sync()
+
+    def _connect_editor(self):
+        self.editor.idle.connect(self._editor_idle)
+        self.editor.saved.connect(self.sessions.protect_export)
+        self.editor.closed.connect(self._editor_closed)
+        self.editor.failed.connect(self._editor_failed)
+        self.editor.blocked.connect(self._editor_blocked)
+        self.editor.state_changed.connect(self._editor_state_changed)
+        self.editor.renamed.connect(self._clip_renamed)
+        self.editor.deleted.connect(self._clip_deleted)
+
+    def _clip_deleted(self, path):
+        if self.clip_path == path:
+            self.clip_path = self.clip_state = None
+            self.clip_temporary = False
+        if self.last_replay is not None and self.last_replay.state.media.path == path:
+            self.last_replay = None
+        if self.pending_clip is not None and self.pending_clip[0] == path:
+            self.pending_clip = None
+        self._sync()
+
+    def _clip_renamed(self, old, new):
+        from dataclasses import replace
+        if self.clip_path == old:
+            self.clip_path = new
+            if self.clip_state is not None:
+                self.clip_state = replace(self.clip_state, media=replace(self.clip_state.media, path=new))
+        if self.last_replay is not None and self.last_replay.state.media.path == old:
+            state = self.last_replay.state
+            self.last_replay = replace(self.last_replay, state=replace(state, media=replace(state.media, path=new)))
+
+    def _editor_state_changed(self, state):
+        if state is not None:
+            self.clip_state = state
+            self.clip_path = state.media.path
+            self.clip_temporary = state.temporary_source
+            self._sync()
 
     def _editor_idle(self):
         if self.pending_clip is not None and not self.editor_busy and not self.quitting:
@@ -515,7 +602,8 @@ class MainWindow(QMainWindow):
         self._maybe_quit()
 
     def _editor_closed(self):
-        self.clip_state = self.editor.state
+        if self.editor.state is not None:
+            self.clip_state = self.editor.state
         self.editor.deleteLater()
         self.editor = None
         if self.pending_clip is not None and not self.quitting:
@@ -531,6 +619,9 @@ class MainWindow(QMainWindow):
         self._notify(message, True)
 
     def _editor_blocked(self):
+        if self.quitting:
+            self.quitting = False
+            self._sync()
         self.record_pending = False
         self.pending_clip = None
         self._notify('Finish saving or changing options in the editor first.')

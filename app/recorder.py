@@ -8,19 +8,17 @@ import wave
 from PySide6.QtCore import QObject, QProcess, QTimer, Signal
 
 from .audio import AudioCapture, AudioDevice, mux_args
-from .exporter import RATES
+from .capture_rates import validate_rate
 from .jobs import FFmpegJob, background
+from .screen_capture import choose_capture, input_args
 from .video_utils import executable, run_checked
 
 
-def capture_args(output: Path, fps: int, geometry: tuple[int, int, int, int]) -> list[str]:
-    if fps not in RATES:
-        raise ValueError('Unsupported recording frame rate.')
-    x, y, width, height = geometry
-    return ['-hide_banner', '-y', '-copyts', '-f', 'gdigrab', '-framerate', str(fps),
-        '-draw_mouse', '1', '-offset_x', str(x), '-offset_y', str(y), '-video_size',
-        f'{width}x{height}', '-i', 'desktop', '-an', '-vf',
-        'showinfo,setpts=PTS-STARTPTS,pad=ceil(iw/2)*2:ceil(ih/2)*2',
+def capture_args(output: Path, fps: int, geometry: tuple[int, int, int, int],
+                 capture_output: int | None = None) -> list[str]:
+    validate_rate(fps)
+    return ['-hide_banner', '-y', '-copyts', '-filter_threads', '1'] + input_args(fps, geometry, capture_output) + ['-an', '-vf',
+        'settb=1/1000000,showinfo,setpts=PTS-STARTPTS,pad=ceil(iw/2)*2:ceil(ih/2)*2',
         '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18', '-pix_fmt', 'yuv420p',
         '-fps_mode', 'vfr', '-video_track_timescale', '1000000', str(output)]
 
@@ -41,6 +39,7 @@ class Recorder(QObject):
         self.watchdog.setSingleShot(True)
         self.watchdog.timeout.connect(self._timeout)
         self.audio = None
+        self.window_video = None
         self.video_epoch = None
         self.busy = False
         self.stopping = False
@@ -57,6 +56,8 @@ class Recorder(QObject):
             return
         self.busy, self.stopping = True, False
         self.folder, self.video_epoch = folder, None
+        self.geometry = geometry
+        self.fps = fps
         self.log = self.pending = ''
         self.fatal_error = ''
         self.audio = None
@@ -68,14 +69,11 @@ class Recorder(QObject):
             raise RuntimeError('Screen recording requires Windows 10 or 11. Video import works on other systems.')
         tool = executable('ffmpeg')
         executable('ffprobe')
-        inputs = run_checked([tool, '-hide_banner', '-devices'])
-        # FFmpeg lists devices on stdout; validate before starting any microphone.
-        if 'gdigrab' not in inputs:
-            raise RuntimeError('This FFmpeg build has no gdigrab screen capture. Install a full Windows build.')
+        self.capture_output = choose_capture(fps, geometry)
         encoders = run_checked([tool, '-hide_banner', '-encoders'])
         if 'libx264' not in encoders:
             raise RuntimeError('This FFmpeg build needs the libx264 encoder.')
-        args = capture_args(folder / 'screen.mp4', fps, geometry)
+        args = capture_args(folder / 'screen.mp4', fps, geometry, self.capture_output)
         if device:
             self.audio = AudioCapture(device, folder / 'audio.wav')
             self.audio.start()
@@ -86,8 +84,26 @@ class Recorder(QObject):
             self.worker = background(self._stop_audio, result=self._cancelled_start, error=self._fail)
             return
         self.status.emit('Starting capture…')
+        if self.window_video is not None:
+            self.window_video.kill()
+            self.window_video.deleteLater()
+            self.window_video = None
+        if self.capture_output == 'windows':
+            from .window_video import WindowVideo
+            self.window_video = WindowVideo(self.process, self)
+            self.window_video.failed.connect(self._window_failed)
+            try:
+                self.window_video.start(self.fps, self.geometry)
+            except (RuntimeError, OSError) as error:
+                self.fatal_error = str(error)
+                self.worker = background(self._stop_audio, result=self._launch_error_cleaned, error=self._fail)
+                return
         self.process.start(*command)
         self.watchdog.start(15000)
+
+    def _window_failed(self, message):
+        self.fatal_error = message
+        self.stop()
 
     def _cancelled_start(self, _):
         self._fail('Recording cancelled before capture began.')
@@ -119,15 +135,22 @@ class Recorder(QObject):
         self.status.emit('Finishing recording…')
         if self.process.state() == QProcess.ProcessState.NotRunning:
             return  # Preparation will finish and release audio before reporting cancellation.
-        self.process.write(b'q\n')
+        if self.window_video is not None:
+            self.window_video.stop()
+        else:
+            self.process.write(b'q\n')
         self.watchdog.start(15000)
 
     def _timeout(self):
         self.fatal_error = 'Screen capture timed out. Partial files are retained in the session folder.'
+        if self.window_video is not None:
+            self.window_video.kill()
         self.process.kill()
 
     def _error(self, error):
         if error == QProcess.ProcessError.FailedToStart:
+            if self.window_video is not None:
+                self.window_video.stop()
             self.fatal_error = self.process.errorString()
             self.worker = background(self._stop_audio, result=self._launch_error_cleaned, error=self._fail)
 
@@ -139,6 +162,8 @@ class Recorder(QObject):
             self.audio.stop()
 
     def _finished(self, code, status):
+        if self.window_video is not None:
+            self.window_video.stop()
         self.watchdog.stop()
         self._read()
         self.worker = background(self._finish_audio, (code, status == QProcess.ExitStatus.NormalExit),

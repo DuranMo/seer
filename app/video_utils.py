@@ -56,7 +56,7 @@ class Media:
     video_index: int = 0
 
 
-def probe(path: Path) -> Media:
+def probe(path: Path, *, inspect_frames=True) -> Media:
     path = path.resolve(strict=True)
     tool = executable('ffprobe')
     data = json.loads(run_checked([tool, '-v', 'error', '-show_streams', '-show_format',
@@ -77,7 +77,7 @@ def probe(path: Path) -> Media:
     # neither trim nor seek ever converts time into frame indices.
     frames = json.loads(run_checked([tool, '-v', 'error', '-select_streams', str(video['index']),
         '-read_intervals', '%+30', '-show_frames', '-show_entries',
-        'frame=best_effort_timestamp_time,pkt_duration_time', '-of', 'json', str(path)]))
+        'frame=best_effort_timestamp_time,pkt_duration_time', '-of', 'json', str(path)])) if inspect_frames else {}
     stamps = tuple(number(f['best_effort_timestamp_time']) for f in frames.get('frames', [])
                    if 'best_effort_timestamp_time' in f)
     deltas = [b - a for a, b in zip(stamps, stamps[1:]) if b > a]

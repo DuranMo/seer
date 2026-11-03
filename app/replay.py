@@ -19,8 +19,9 @@ from .jobs import background
 from .replay_capture import choose_encoder, replay_args
 from .replay_export import build_replay
 from .rolling_audio import RollingAudio
+from .screen_capture import choose_capture
 from .segments import Segment, SegmentRing
-from .video_utils import executable, run_checked
+from .video_utils import executable
 
 
 @dataclass
@@ -63,6 +64,8 @@ class Replay(QObject):
         self.last_frame = 0.0
         self.time_base = 0.000001
         self.encoder = ''
+        self.capture_output = None
+        self.window_video = None
         self.manual_start = None
         self.manual_destination = None
         self.manual_leases = None
@@ -110,10 +113,9 @@ class Replay(QObject):
     def _prepare(self, fps, device, geometry, software):
         if sys.platform != 'win32':
             raise RuntimeError('Replay capture requires Windows 10 or 11.')
-        tool = executable('ffmpeg')
+        executable('ffmpeg')
         executable('ffprobe')
-        if 'gdigrab' not in run_checked([tool, '-hide_banner', '-devices']):
-            raise RuntimeError('This FFmpeg build does not support gdigrab screen capture.')
+        self.capture_output = choose_capture(fps, geometry)
         encoder = 'libx264' if software else choose_encoder(geometry[2], geometry[3], fps)
         if device:
             self.audio = RollingAudio(device, self.folder, self.sound)
@@ -128,8 +130,40 @@ class Replay(QObject):
             self._stop_audio()
         else:
             self.capture_done = False
-            self.process.start(executable('ffmpeg'), replay_args(self.folder, self.fps, self.geometry, encoder))
+            if not self._launch_capture():
+                return
             self.watchdog.start(15000)
+
+    def _launch_capture(self):
+        try:
+            tool = executable('ffmpeg')
+            args = replay_args(self.folder, self.fps, self.geometry, self.encoder, self.capture_output)
+        except (RuntimeError, OSError, ValueError) as error:
+            self.capture_done = True
+            self.error = str(error)
+            self.stop(discard=True)
+            return False
+        if self.window_video is not None:
+            self.window_video.kill()
+            self.window_video.deleteLater()
+            self.window_video = None
+        if self.capture_output == 'windows':
+            from .window_video import WindowVideo
+            self.window_video = WindowVideo(self.process, self)
+            self.window_video.failed.connect(self._window_failed)
+            try:
+                self.window_video.start(self.fps, self.geometry)
+            except (RuntimeError, OSError) as error:
+                self.capture_done = True
+                self.error = str(error)
+                self.stop(discard=True)
+                return False
+        self.process.start(tool, args)
+        return True
+
+    def _window_failed(self, message):
+        self.error = message
+        self.stop(discard=True)
 
     def _prepare_failed(self, message):
         self.preparing = False
@@ -191,8 +225,11 @@ class Replay(QObject):
                 self._release(self.requests.popleft().leases)
         if self.preparing:
             return
+        if self.window_video is not None:
+            self.window_video.stop()
         if self.process.state() != QProcess.ProcessState.NotRunning:
-            self.process.write(b'q\n')
+            if self.window_video is None:
+                self.process.write(b'q\n')
             self.watchdog.start(5000)
         else:
             self._stop_audio()
@@ -201,6 +238,8 @@ class Replay(QObject):
     def _timeout(self):
         self.error = self.error or 'Replay capture timed out. Restart replay to try again.'
         if self.process.state() != QProcess.ProcessState.NotRunning:
+            if self.window_video is not None:
+                self.window_video.kill()
             self.process.kill()
         else:
             self.stop(discard=True)
@@ -243,6 +282,8 @@ class Replay(QObject):
                     self.changed.emit()
 
     def _capture_finished(self, code, status):
+        if self.window_video is not None:
+            self.window_video.stop()
         self._read()
         self.capture_done = True
         self.running = False
@@ -254,7 +295,8 @@ class Replay(QObject):
                 self.encoder = 'libx264'
                 self.capture_done = False
                 self.log = self.pending = ''
-                self.process.start(executable('ffmpeg'), replay_args(self.folder, self.fps, self.geometry, self.encoder))
+                if not self._launch_capture():
+                    return
                 self.watchdog.start(15000)
                 return
             self.error = self.error or self.log[-4000:] or 'Replay capture stopped unexpectedly.'

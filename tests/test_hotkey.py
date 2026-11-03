@@ -8,7 +8,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 import pytest
 from PySide6.QtWidgets import QApplication
 
-from app.hotkey import GlobalHotkey, WM_HOTKEY, native_shortcut
+from app.hotkey import GlobalHotkey, WM_HOTKEY, native_shortcut, set_shortcuts
 
 
 class Backend:
@@ -80,5 +80,34 @@ def test_record_and_clip_hotkeys_have_independent_windows_ids():
     assert recording.identifier in backend.registered
     clipping.set_shortcut('Ctrl+Shift+F8')
     assert len(backend.registered) == 2
+    recording.close()
+    clipping.close()
+
+
+def test_combined_shortcuts_can_swap_and_roll_back_on_conflict():
+    app = QApplication.instance() or QApplication([])
+
+    class Conflicts(Backend):
+        def RegisterHotKey(self, window, identifier, modifiers, key):
+            if key == 0x79 or (modifiers, key) in self.registered.values():
+                return False  # F10 belongs to another application.
+            return super().RegisterHotKey(window, identifier, modifiers, key)
+
+    backend = Conflicts()
+    recording = GlobalHotkey(backend=backend)
+    clipping = GlobalHotkey(backend=backend)
+    recording.set_shortcut('Ctrl+Shift+R')
+    clipping.set_shortcut('Ctrl+Shift+F8')
+    set_shortcuts(recording, clipping, 'Ctrl+Shift+F8', 'Ctrl+Shift+R', clip_active=True)
+    assert recording.text == 'Ctrl+Shift+F8'
+    assert clipping.text == 'Ctrl+Shift+R'
+    with pytest.raises(RuntimeError):
+        set_shortcuts(recording, clipping, 'Alt+F9', 'Alt+F10', clip_active=True)
+    assert recording.text == 'Ctrl+Shift+F8'
+    assert clipping.text == 'Ctrl+Shift+R'
+    assert len(backend.registered) == 2
+    set_shortcuts(recording, clipping, 'Alt+F9', 'Ctrl+Shift+R', clip_active=False)
+    assert recording.identifier is not None and clipping.identifier is None
+    assert len(backend.registered) == 1
     recording.close()
     clipping.close()

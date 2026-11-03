@@ -107,3 +107,32 @@ class GlobalHotkey(QObject):
     def close(self):
         self.unregister()
         QApplication.instance().removeNativeEventFilter(self.filter)
+
+
+def set_shortcuts(record, clip, recording: str, clipping: str, *, clip_active: bool):
+    # Validate both before releasing either registration. Releasing together
+    # permits swapping the two shortcuts. Roll back the pair on a conflict.
+    native_shortcut(recording)
+    native_shortcut(clipping)
+    if QKeySequence(recording) == QKeySequence(clipping):
+        raise ValueError('Recording and clipping need different shortcuts.')
+    old_record, old_clip = record.text, clip.text or DEFAULT_CLIP_KEYBIND
+    record.unregister()
+    clip.unregister()
+    try:
+        record.set_shortcut(recording)
+        clip.set_shortcut(clipping)
+    except (ValueError, RuntimeError) as error:
+        record.unregister()
+        clip.unregister()
+        try:
+            record.set_shortcut(old_record)
+            if clip_active:
+                clip.set_shortcut(old_clip)
+            else:
+                clip.text = old_clip
+        except (ValueError, RuntimeError) as rollback:
+            raise RuntimeError(f'{error} Previous shortcuts could not be restored: {rollback}') from error
+        raise
+    if not clip_active:
+        clip.unregister()

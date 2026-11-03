@@ -65,7 +65,7 @@ def main():
             raise ctypes.WinError(ctypes.get_last_error())
         parent_ws, parent_private = counters.WorkingSetSize, counters.PrivateUsage
         child_ws = child_private = 0
-        if window.editor is not None and hasattr(window.editor, 'process') and not window.editor.finished:
+        if window.editor is not None and not window.editor.finished:
             kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
             kernel.OpenProcess.restype = wintypes.HANDLE
             kernel.CloseHandle.argtypes = [wintypes.HANDLE]
@@ -88,11 +88,7 @@ def main():
 
     def startup():
         sample('startup')
-        if hasattr(window, '_open_clip'):
-            window._open_clip(options.clip.resolve(), temporary=False)
-        else:
-            window.editor.load(options.clip.resolve())
-            window._show_editor()
+        window._open_clip(options.clip.resolve(), temporary=False)
         await_loaded()
 
 
@@ -101,16 +97,10 @@ def main():
             QTimer.singleShot(100, await_loaded)
             return
         if window.editor.media is None:
-            errors.append('The sample video failed to load: ' + window.editor.status.text())
+            errors.append('The sample video failed to load.')
             finish()
             return
-        if hasattr(window.editor, 'send'):
-            window.editor.send('play')
-        else:
-            window.editor.audio.setMuted(True)
-            window.editor.start.setValue(0.2)
-            window.editor.player.setPosition(500)
-            window.editor._toggle()
+        window.editor.send('play')
         QTimer.singleShot(1600, preview)
 
 
@@ -121,7 +111,7 @@ def main():
 
 
     def closed():
-        if window.editor is not None and hasattr(window.editor, 'send'):
+        if window.editor is not None:
             QTimer.singleShot(100, closed)
             return
         sample('closed')
@@ -134,8 +124,6 @@ def main():
             QTimer.singleShot(100, reopened)
             return
         sample('reopened')
-        if not hasattr(window.editor, 'send') and abs(window.editor.start.value() - 0.2) > 0.001:
-            errors.append('Trim selection was not preserved across editor close/reopen.')
         window.close()
         QTimer.singleShot(2000, finish)
 

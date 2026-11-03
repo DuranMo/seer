@@ -89,13 +89,17 @@ def test_hidden_start_toggle_to_editor_close_to_tray_and_persist_keybind(tmp_pat
 
     def save_key():
         dialog = app.activeModalWidget()
-        dialog.findChild(QKeySequenceEdit).setKeySequence(QKeySequence('Ctrl+Alt+F9'))
+        keys = dialog.findChildren(QKeySequenceEdit)
+        assert len(keys) == 2
+        keys[0].setKeySequence(QKeySequence('Ctrl+Alt+F9'))
+        keys[1].setKeySequence(QKeySequence('Ctrl+Alt+F8'))
         box = dialog.findChild(QDialogButtonBox)
         box.button(QDialogButtonBox.StandardButton.Save).click()
 
     QTimer.singleShot(0, save_key)
     window._keybind()
     assert settings.value('keybind') == 'Ctrl+Alt+F9'
+    assert settings.value('replay/keybind') == 'Ctrl+Alt+F8'
     assert hotkey.text == 'Ctrl+Alt+F9'
     assert not window.isVisible()
     # A new recording still works after the previous recorder's stopping flag.
@@ -110,6 +114,9 @@ def test_hidden_start_toggle_to_editor_close_to_tray_and_persist_keybind(tmp_pat
 
 
 class FakeEditorProcess(QObject):
+    state_changed = Signal(object)
+    renamed = Signal(object, object)
+    deleted = Signal(object)
     idle = Signal()
     saved = Signal(object)
     closed = Signal()
@@ -124,6 +131,10 @@ class FakeEditorProcess(QObject):
 
     def send(self, command):
         self.commands.append(command)
+
+    @property
+    def media(self):
+        return self.state.media if self.state else None
 
 
 def test_tray_waits_for_editor_exit_before_recording_and_reclaims_controller(tmp_path, monkeypatch):
@@ -220,6 +231,8 @@ def test_manual_capture_and_clipping_share_replay_without_starting_second_captur
     monkeypatch.setattr(module, 'primary_geometry', lambda: (0, 0, 100, 100))
     monkeypatch.setattr(module, 'clip_destination', lambda: tmp_path / 'auto-clip.mp4')
     window = module.MainWindow(settings=QSettings(str(tmp_path / 'replay.ini'), QSettings.Format.IniFormat), hotkey=Hotkey())
+    notices = []
+    monkeypatch.setattr(window, '_notify', lambda message, error=False: notices.append((message, error)))
     assert not window.replay_enabled and not window.replay.active
     window._toggle_replay(True)
     window._record()
@@ -227,12 +240,16 @@ def test_manual_capture_and_clipping_share_replay_without_starting_second_captur
     assert window.recorder.start_count == 0
     window._set_length(17)
     window._clip()
+    assert notices == [('Clip saved', False)]
     assert window.replay.clips[0][0] == 17
     assert window.replay.manual_active and window.replay.starts == 1
     source = window.replay.clips[0][1]
     media = Media(source, 160, 120, 18, True, '30/1', '30/1', '1/1000', 0, (), False)
     state = EditorState(media, True, 0.5, 17.5, 500, (0, 0, 1, 1), 'mp4', None, True)
     window.replay.ready.emit(ReplayResult(state, 'clip'))
+    assert notices == [('Clip saved', False)]  # No second completion notification.
+    window._clip_failed('Disk is full')
+    assert notices[-1] == ('Disk is full', True)
     assert window.editor is None  # Clipping does not interrupt the game/editor.
     assert window.last_replay.state == state
     window._record()

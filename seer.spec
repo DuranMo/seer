@@ -10,7 +10,7 @@ icon_path.parent.mkdir(parents=True, exist_ok=True)
 image = QImage(str(logo)).scaled(256, 256, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
 if image.isNull() or not image.save(str(icon_path)):
     raise RuntimeError('Could not convert seer_logo.png to a Windows application icon.')
-tools = [(str(root / 'bin' / name), 'bin') for name in ('ffmpeg.exe', 'ffprobe.exe')
+tools = [(str(root / 'bin' / name), 'bin') for name in ('ffmpeg.exe', 'ffprobe.exe', 'seer-capture.exe')
          if (root / 'bin' / name).is_file()]
 a = Analysis(['main.py'], pathex=[str(root)], binaries=tools, datas=[(str(logo), '.')],
              hiddenimports=['pyaudiowpatch'],

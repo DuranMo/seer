@@ -1,6 +1,14 @@
 # Memory optimization results
 
-Measured on this Windows 11 machine using Python 3.12.16 / PySide6 6.12.0, a generated 1920×1080 H.264/AAC video, native Windows rendering, and the same open/play/close/reopen sequence. These are short local measurements, not universal limits or a Medal comparison.
+Final `dist/Seer` build: 51.89 MiB startup working set / 25.94 MiB private commit; 56.43 MiB working set / 27.59 MiB private commit after each of two editor open/close cycles. The packaged diagnostic reported no errors and no Qt Multimedia import into the tray process.
+
+The current `dist/sources/Seer` packaged diagnostic measured 51.91 MiB working set / 25.89 MiB private commit at startup and 56.45 / 56.46 MiB working set after two editor open/close cycles (27.58 MiB private commit). No Qt Multimedia module was imported into the tray process, and the check reported no errors. These figures exclude active capture and an open manager. A separate native library check verified that the shared GUI process exits when both its manager and editor windows close.
+
+Capture update (November 3, 2026): short four-second 1920x1080/30 FPS AMD AMF capture-process checks, using one conversion filter thread, measured GDI at 104.41 MiB peak sampled working set / 121.73 MiB private committed memory, and Desktop Duplication at 105.28 / 162.32 MiB. These figures cover FFmpeg alone, exclude GPU memory, and are not total application or long-run measurements. Desktop Duplication avoids the GDI capture path implicated in cursor flicker; its committed-memory cost remains higher on this hardware. Selecting All with ordinary system/microphone audio still uses this capture path and starts no native helper. Selected windows and selected-app audio now use optional native helper processes and can require additional RAM and GPU memory; their long-run resource use has not been profiled.
+
+The earlier `dist/updated/Seer` editor diagnostic measured 51.29 MiB working set at idle startup and 56.00 / 56.01 MiB after two editor open/close cycles, with no reported errors and no Qt Multimedia import in the tray process. These historical idle readings exclude active capture and an open library. The new clip manager preloads its thumbnail grid and keeps an editor ready inside a separate GUI process. It can use more memory while open; closing both manager and editor exits the GUI process, releasing its decoder, thumbnails, and allocations. Native checks verified process exit and roughly 0.44-0.50 second warm-editor metadata loading on a short local test clip, rather than a universal latency guarantee.
+
+Measured on this Windows 11 machine using Python 3.12.16 / PySide6 6.12.0, a generated 1920x1080 H.264/AAC video, native Windows rendering, and the same open/play/close/reopen sequence. These are short local measurements, not universal limits or a Medal comparison.
 
 | Phase | Original working set | Optimized working set |
 | --- | ---: | ---: |
