@@ -1,4 +1,4 @@
-﻿# Preface
+﻿## Preface
 
 This project served two goals:
 1) to help create a low-cost screen recording app with a built in editing system
@@ -6,11 +6,11 @@ This project served two goals:
 
 # Seer
 
-A small screen recorder & replay clipper for windows
+A small screen recorder & replay clipper for Windows
 
 ## Install
 
-1. download `Seer-Windows.zip` from [releases](https://github.com/DuranMo/seer/releases)
+1. download `Seer.zip` from [releases](https://github.com/DuranMo/seer/releases)
 2. extract the whole folder
 3. open `Seer.exe`
 
