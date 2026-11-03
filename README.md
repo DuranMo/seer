@@ -1,4 +1,4 @@
-﻿# Preface
+﻿## Preface
 
 This project served two goals:
 1) to help create a low-cost screen recording app with a built in editing system
