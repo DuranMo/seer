@@ -1,9 +1,3 @@
-﻿## Preface
-
-This project served two goals:
-1) to help create a low-cost screen recording app with a built in editing system
-2) to explore AI-assisted software development (particularly using Codex).
-
 # Seer
 
 A small screen recorder & replay clipper for Windows
